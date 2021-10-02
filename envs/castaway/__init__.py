@@ -1,1 +1,1 @@
-from .castaway_shark import CastawayAndShark
+from .castaway import Castaway

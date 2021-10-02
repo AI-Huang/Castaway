@@ -6,6 +6,10 @@
 
 import numpy as np
 
+"""Multi-agent for the castaway and the shark
+NOT finished yet.
+"""
+
 import gym
 from gym import spaces
 from gym.utils import seeding
