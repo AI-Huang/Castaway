@@ -1,0 +1,5 @@
+{
+  "action_dim": 50,
+  "gamma": 0.99,
+  "learning_rate": 0.001
+}

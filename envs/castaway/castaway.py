@@ -6,6 +6,7 @@
 
 import copy
 import numpy as np
+from parl.utils import logger
 
 import gym
 from gym import spaces
@@ -30,11 +31,13 @@ class Castaway(gym.Env):
         0       Castaway Position r_C            0                      1
         1       Castaway Position theta_C        0 rad                  2*np.pi
         2       Castaway Velocity Direction \phi 0 rad     2*np.pi rad (180 deg)
+        3       Shark Position r_S               1                       1
+        4       \Delta\theta           -np.pi                   np.pi
+        5       Shark Angular Velocity \omega_S    -4s rad/s or 4s rad/s
+        \omega_S can only be -4s or 4s, other variables are continuous.
+        Get observations:
+        (r_C, theta_C, phi, r_S, theta_S, omega_S) = self.state
 
-        Num     Observation                      Min                     Max
-        0       Shark Position r_S               1                       1
-        1       \Delta\theta           -np.pi                   np.pi
-        2       Shark Angular Velocity \omega_S    -4s rad/s or 4s rad/s
     Hparam:
         act_dim: how many discrete points the \phi space is devided into.
         s: m/s, speed unit the Castaway (s) and the Shark (4s) default 2.0.
@@ -46,26 +49,22 @@ class Castaway(gym.Env):
         'video.frames_per_second': 2
     }
 
-    def __init__(self, act_dim, s=2.0, speed_ratio=4.0, tau=0.02):
+    def __init__(self, act_dim, s=2.0, speed_ratio=4.0, tau=0.02, death_steps=10000):
         self.act_dim = act_dim
         self.s = s
         self.speed_ratio = speed_ratio  # the shart and the castaway's speed ratio
         self.tau = tau  # seconds between state updates
+        self.death_steps = death_steps  # 存在跑不了的case，我们认为他饿死了
+        # 为了加快训练，设置得小一点
 
         self.action_space = spaces.Discrete(
             act_dim)  # 0, 1, 2..., N-1
 
-        self.box_castaway = spaces.Box(
-            np.array([0.0, 0.0, 0.0]),
-            np.array([1.0, 2*np.pi, 0.5*np.pi]))
-        self.box_shark = spaces.Box(
-            np.array([1.0, 0.0, 0.0]),
-            np.array([1.0, 2*np.pi, 0.5*np.pi]))
-        self.observation_space = self.box_castaway
-
-        # Initial rewards of the Castaway and the Shark
-        self.agent_reward = {0: {'lemon': -10, 'apple': 10},
-                             1: {'lemon': -1, 'apple': 1}}
+        self.observation_space = spaces.Box(
+            np.array([0.0, -np.pi, -np.pi, 1.0, -np.pi,
+                     -self.speed_ratio*self.s]),
+            np.array([1.0, np.pi, np.pi, 1.0, np.pi,
+                      self.speed_ratio*self.s]))
 
         self.seed()
         self.viewer = None
@@ -88,11 +87,12 @@ class Castaway(gym.Env):
         # print(r_C, theta_C, phi, r_S, theta_S, omega_S)
 
         # phi and omega_S are both state variables and action variables
-        phi = 0.5 * np.pi / (self.act_dim-1) * action
+        phi = np.linspace(0, 2*np.pi, self.act_dim, endpoint=False)[action]
+        phi = norm_angle(phi)  # to [-pi, pi]
 
         # The shark's strategy
         omega_S_abs = self.speed_ratio*self.s  # 4s rad/s
-        delta_theta = theta_C - theta_S
+        delta_theta = norm_angle(theta_C - theta_S)
         omega_S = np.sign(delta_theta) * omega_S_abs  # +4s rad/s or -4s rad/s
 
         # Dynamics
@@ -102,18 +102,45 @@ class Castaway(gym.Env):
         r_S = 1
         theta_S += omega_S * self.tau
 
-        self.state = (r_C, theta_C, phi, r_S, theta_S, omega_S)
+        self.state = (r_C, norm_angle(theta_C), phi,
+                      r_S, norm_angle(theta_S), omega_S)
 
         done = False
         # Escaped
         if r_C >= 1.0 and delta_theta != 0:
             done = True
-        done = bool(done)
+            # logger.info(
+            #     f"The castaway escaped! done:{done}, r_C:{r_C}, delta_theta:{delta_theta}")
 
-        # linear reward
-        reward = (1-r_C) + np.abs(delta_theta)
+        if done:
+            # linear reward
+            # Let excape score be a very large number
+            reward = (1-r_C) + np.abs(delta_theta) + 1000000
+            # Escaped!
+            # previously reward = 1.0
+            if self.steps_beyond_done == 0:
+                logger.warn(
+                    "You are calling 'step()' even though this "
+                    "environment has already returned done = True. You "
+                    "should always call 'reset()' once you receive 'done = "
+                    "True' -- any further steps are undefined behavior."
+                )
 
-        return self.state, reward, done, {}
+        elif self.steps_beyond_done is None:
+            self.steps_beyond_done = 0
+            # reward = 0.0
+            reward = (1-r_C) + np.abs(delta_theta)
+        else:
+            self.steps_beyond_done += 1
+            if self.steps_beyond_done >= self.death_steps:
+                logger.info(
+                    f"self.steps_beyond_done exceed self.death_steps: {self.death_steps}. Force Done!")
+                done = True
+
+            # reward = 0.0
+            reward = (1-r_C) + np.abs(delta_theta)
+
+        return np.array(self.state, dtype=np.float32), reward, done, {}
 
     def _draw(self, args):
         from PIL import Image, ImageDraw
@@ -124,6 +151,8 @@ class Castaway(gym.Env):
                                      (50, 50), cell_size=50, fill='white')
 
     def reset(self):
+        self.steps_beyond_done = None
+
         # The Castaway
         r_C = self.np_random.uniform(low=0.0, high=1.0)
         theta_C = self.np_random.uniform(low=-np.pi, high=np.pi)
@@ -133,13 +162,13 @@ class Castaway(gym.Env):
         r_S = 1.0
         theta_S = self.np_random.uniform(low=-np.pi, high=np.pi)
         omega_S = self.np_random.uniform(low=0.0, high=1)
-        if omega_S < 0.5:  # 0.5 the probability
+        if omega_S < 0.5:  # 0.5 is the probability
             omega_S = self.speed_ratio*self.s  # e.g. 4s rad/s
         else:
             omega_S = -self.speed_ratio*self.s
 
         self.state = (r_C, theta_C, phi, r_S, theta_S, omega_S)
-        self.steps_beyond_done = None
+
         return np.array(self.state, dtype=np.float32)
 
     def render(self, mode='human'):
